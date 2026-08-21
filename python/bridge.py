@@ -23,6 +23,25 @@ clients = set()
 startup_time = datetime.utcnow()
 
 
+def find_web_dir():
+    """Find the web directory in different deployment scenarios"""
+    # Get the directory containing this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Scenario 1: Docker container (/app/bridge.py, web at /app/web/)
+    web_dir = os.path.join(script_dir, 'web')
+    if os.path.exists(web_dir):
+        return web_dir
+    
+    # Scenario 2: Development (python/bridge.py, web at ../web/)
+    web_dir = os.path.join(os.path.dirname(script_dir), 'web')
+    if os.path.exists(web_dir):
+        return web_dir
+    
+    # Not found
+    raise FileNotFoundError(f"Could not find web directory. Searched: {script_dir}/web and {os.path.dirname(script_dir)}/web")
+
+
 async def health_handler(request):
     """Health check endpoint for load balancer"""
     uptime_seconds = (datetime.utcnow() - startup_time).total_seconds()
@@ -83,9 +102,8 @@ async def websocket_handler(request):
 
 async def index_handler(request):
     """Serve the dashboard HTML"""
-    # web/ is a sibling directory in the container
-    base_dir = os.path.dirname(os.path.dirname(__file__))
-    index_path = os.path.join(base_dir, 'web', 'index.html')
+    web_dir = find_web_dir()
+    index_path = os.path.join(web_dir, 'index.html')
     return web.FileResponse(index_path)
 
 
@@ -103,6 +121,8 @@ async def on_startup(app):
     print(f"  Dashboard:   http://0.0.0.0:{HTTP_PORT}/")
     print(f"  Health:      http://0.0.0.0:{HTTP_PORT}/health")
     print(f"  WebSocket:   ws://0.0.0.0:{HTTP_PORT}/ws")
+    print()
+    print(f"Web directory: {find_web_dir()}")
     print()
     print("Ready to relay telemetry between browser clients")
     print("=" * 70)
@@ -127,8 +147,7 @@ def create_app():
     app.router.add_get('/ws', websocket_handler)
     
     # Static files
-    base_dir = os.path.dirname(os.path.dirname(__file__))
-    web_dir = os.path.join(base_dir, 'web')
+    web_dir = find_web_dir()
     app.router.add_static('/static', web_dir, name='static')
     
     # Lifecycle hooks
