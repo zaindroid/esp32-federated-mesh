@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-S3 Firmware Flasher</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0B0E14;
+            color: #F8FAFC;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-size: 28px;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, #38BDF8 0%, #818CF8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            color: #64748B;
+            margin-bottom: 32px;
+        }
+
+        .card {
+            background: #1E293B;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 16px;
+        }
+
+        .status-badge.disconnected {
+            background: #1E293B;
+            color: #64748B;
+        }
+
+        .status-badge.connected {
+            background: rgba(34, 197, 94, 0.1);
+            color: #22C55E;
+        }
+
+        .status-badge.flashing {
+            background: rgba(56, 189, 248, 0.1);
+            color: #38BDF8;
+        }
+
+        .status-badge.error {
+            background: rgba(239, 68, 68, 0.1);
+            color: #EF4444;
+        }
+
+        .btn {
+            background: #38BDF8;
+            color: #0B0E14;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .btn:hover:not(:disabled) {
+            background: #0EA5E9;
+            transform: translateY(-1px);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: #334155;
+            color: #F8FAFC;
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            background: #475569;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .progress-container {
+            margin-top: 20px;
+            display: none;
+        }
+
+        .progress-container.active {
+            display: block;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #0F172A;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 8px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #38BDF8 0%, #818CF8 100%);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            font-size: 13px;
+            color: #94A3B8;
+        }
+
+        .log {
+            background: #0F172A;
+            border: 1px solid #1E293B;
+            border-radius: 8px;
+            padding: 16px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'SF Mono', 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .log-entry {
+            margin-bottom: 4px;
+            color: #64748B;
+        }
+
+        .log-entry.success {
+            color: #22C55E;
+        }
+
+        .log-entry.error {
+            color: #EF4444;
+        }
+
+        .log-entry.warning {
+            color: #F59E0B;
+        }
+
+        .log-entry.info {
+            color: #38BDF8;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-top: 16px;
+        }
+
+        .info-item {
+            background: #0F172A;
+            padding: 12px;
+            border-radius: 8px;
+        }
+
+        .info-label {
+            font-size: 12px;
+            color: #64748B;
+            margin-bottom: 4px;
+        }
+
+        .info-value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #F8FAFC;
+        }
+
+        .file-upload {
+            border: 2px dashed #334155;
+            border-radius: 8px;
+            padding: 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-bottom: 16px;
+        }
+
+        .file-upload:hover {
+            border-color: #38BDF8;
+            background: rgba(56, 189, 248, 0.05);
+        }
+
+        .file-upload.has-file {
+            border-color: #22C55E;
+            background: rgba(34, 197, 94, 0.05);
+        }
+
+        .file-upload input {
+            display: none;
+        }
+
+        .file-info {
+            margin-top: 8px;
+            font-size: 13px;
+            color: #94A3B8;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ESP32-S3 Firmware Flasher</h1>
+        <p class="subtitle">Flash your ESP32-S3 with federated learning firmware via USB</p>
+
+        <div class="card">
+            <span id="statusBadge" class="status-badge disconnected">● Disconnected</span>
+            
+            <div class="info-grid" id="deviceInfo" style="display: none;">
+                <div class="info-item">
+                    <div class="info-label">Chip Type</div>
+                    <div class="info-value" id="chipType">-</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">Flash Size</div>
+                    <div class="info-value" id="flashSize">-</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">MAC Address</div>
+                    <div class="info-value" id="macAddr">-</div>
+                </div>
+            </div>
+
+            <div class="btn-group" style="margin-top: 20px;">
+                <button class="btn" id="connectBtn" onclick="connectDevice()">Connect ESP32</button>
+                <button class="btn btn-secondary" id="disconnectBtn" onclick="disconnectDevice()" disabled>Disconnect</button>
+            </div>
+
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <div class="progress-text" id="progressText">Preparing...</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-bottom: 16px;">Firmware Selection</h3>
+            
+            <div class="file-upload" id="firmwareUpload" onclick="document.getElementById('firmwareInput').click()">
+                <input type="file" id="firmwareInput" accept=".bin" onchange="handleFirmwareSelect(event)">
+                <div style="font-size: 14px; color: #F8FAFC; margin-bottom: 8px;">
+                    📁 Click to select firmware (.bin)
+                </div>
+                <div class="file-info" id="fileInfo">
+                    Or use the pre-built firmware below
+                </div>
+            </div>
+
+            <div class="btn-group">
+                <button class="btn" id="flashCustomBtn" onclick="flashCustomFirmware()" disabled>Flash Custom Firmware</button>
+                <button class="btn btn-secondary" id="downloadBtn" onclick="downloadPrebuilt()">Download Pre-built Firmware</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-bottom: 16px;">Console Log</h3>
+            <div class="log" id="log">
+                <div class="log-entry">Ready to flash ESP32-S3 firmware...</div>
+                <div class="log-entry info">1. Connect your ESP32-S3 via USB</div>
+                <div class="log-entry info">2. Click "Connect ESP32" and select the serial port</div>
+                <div class="log-entry info">3. Select a firmware file or download pre-built</div>
+                <div class="log-entry info">4. Click "Flash Custom Firmware" to begin</div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { ESPLoader, Transport } from 'https://unpkg.com/esptool-js@0.4.1/bundle.js';
+
+        let port = null;
+        let transport = null;
+        let esploader = null;
+        let selectedFirmware = null;
+
+        window.connectDevice = async function() {
+            try {
+                log('Requesting serial port access...', 'info');
+                
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                
+                updateStatus('connected', 'Connected');
+                document.getElementById('connectBtn').disabled = true;
+                document.getElementById('disconnectBtn').disabled = false;
+                
+                log('Serial port opened', 'success');
+                
+                // Initialize ESP loader
+                transport = new Transport(port);
+                esploader = new ESPLoader(transport, 115200);
+                
+                log('Detecting chip type...', 'info');
+                await esploader.main_fn();
+                await esploader.flash_id();
+                
+                // Get chip info
+                const chipType = await esploader.chip.CHIP_NAME;
+                const flashSize = (await esploader.chip.get_flash_size()) / (1024 * 1024);
+                const macAddr = await esploader.chip.read_mac();
+                
+                document.getElementById('chipType').textContent = chipType;
+                document.getElementById('flashSize').textContent = flashSize + ' MB';
+                document.getElementById('macAddr').textContent = formatMac(macAddr);
+                document.getElementById('deviceInfo').style.display = 'grid';
+                
+                log(`Chip: ${chipType}, Flash: ${flashSize}MB`, 'success');
+                
+            } catch (error) {
+                log(`Connection error: ${error.message}`, 'error');
+                updateStatus('error', 'Connection Failed');
+            }
+        };
+
+        window.disconnectDevice = async function() {
+            if (port) {
+                try {
+                    await port.close();
+                    port = null;
+                    transport = null;
+                    esploader = null;
+                    
+                    updateStatus('disconnected', 'Disconnected');
+                    document.getElementById('connectBtn').disabled = false;
+                    document.getElementById('disconnectBtn').disabled = true;
+                    document.getElementById('deviceInfo').style.display = 'none';
+                    
+                    log('Device disconnected', 'info');
+                } catch (error) {
+                    log(`Disconnect error: ${error.message}`, 'error');
+                }
+            }
+        };
+
+        window.handleFirmwareSelect = function(event) {
+            const file = event.target.files[0];
+            if (file) {
+                selectedFirmware = file;
+                document.getElementById('firmwareUpload').classList.add('has-file');
+                document.getElementById('fileInfo').textContent = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+                document.getElementById('flashCustomBtn').disabled = !port;
+                log(`Firmware selected: ${file.name}`, 'success');
+            }
+        };
+
+        window.flashCustomFirmware = async function() {
+            if (!selectedFirmware || !esploader) {
+                log('No firmware selected or device not connected', 'error');
+                return;
+            }
+
+            try {
+                updateStatus('flashing', 'Flashing...');
+                document.getElementById('progressContainer').classList.add('active');
+                document.getElementById('flashCustomBtn').disabled = true;
+                
+                log('Reading firmware file...', 'info');
+                const firmwareData = await selectedFirmware.arrayBuffer();
+                
+                log('Erasing flash...', 'warning');
+                updateProgress(10, 'Erasing flash...');
+                
+                await esploader.erase_flash();
+                
+                log('Writing firmware to flash...', 'info');
+                updateProgress(30, 'Writing firmware...');
+                
+                const flashOffset = 0x0000; // Boot partition offset for ESP32-S3
+                
+                await esploader.write_flash({
+                    fileArray: [{data: new Uint8Array(firmwareData), address: flashOffset}],
+                    flashSize: 'keep',
+                    flashMode: 'dio',
+                    flashFreq: '80m',
+                    eraseAll: false,
+                    compress: true,
+                    reportProgress: (fileIndex, written, total) => {
+                        const percent = 30 + (written / total) * 60;
+                        updateProgress(percent, `Writing: ${(written / 1024).toFixed(1)} / ${(total / 1024).toFixed(1)} KB`);
+                    }
+                });
+                
+                updateProgress(95, 'Verifying...');
+                log('Firmware flashed successfully!', 'success');
+                
+                updateProgress(100, 'Complete!');
+                updateStatus('connected', 'Flash Complete');
+                
+                log('Resetting device...', 'info');
+                await esploader.hard_reset();
+                
+                setTimeout(() => {
+                    document.getElementById('progressContainer').classList.remove('active');
+                    document.getElementById('flashCustomBtn').disabled = false;
+                }, 2000);
+                
+            } catch (error) {
+                log(`Flash error: ${error.message}`, 'error');
+                updateStatus('error', 'Flash Failed');
+                document.getElementById('flashCustomBtn').disabled = false;
+            }
+        };
+
+        window.downloadPrebuilt = function() {
+            log('Downloading pre-built firmware...', 'info');
+            // Link to GitHub releases or pre-built firmware
+            window.open('https://github.com/zaindroid/esp32-federated-mesh/releases', '_blank');
+        };
+
+        function updateStatus(type, text) {
+            const badge = document.getElementById('statusBadge');
+            badge.className = `status-badge ${type}`;
+            badge.textContent = `● ${text}`;
+        }
+
+        function updateProgress(percent, text) {
+            document.getElementById('progressFill').style.width = percent + '%';
+            document.getElementById('progressText').textContent = text;
+        }
+
+        function log(message, type = '') {
+            const logDiv = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${timestamp}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function formatMac(macArray) {
+            return Array.from(macArray).map(b => b.toString(16).padStart(2, '0')).join(':').toUpperCase();
+        }
+
+        // Check Web Serial API support
+        if (!('serial' in navigator)) {
+            log('Web Serial API not supported in this browser', 'error');
+            log('Please use Chrome, Edge, or Opera', 'warning');
+            document.getElementById('connectBtn').disabled = true;
+        }
+    </script>
+</body>
+</html>
