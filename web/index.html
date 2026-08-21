@@ -291,8 +291,8 @@
         let ws = null;
         let nodes = new Map();
 
-        // WebSocket connection to relay server
-        const wsUrl = `ws://${window.location.hostname}:${parseInt(window.location.port || 80) + 1}`;
+        // WebSocket connection to relay server (same port, upgrade to WebSocket)
+        const wsUrl = `wss://${window.location.hostname}/ws`;
         
         function connectWebSocket() {
             log('Connecting to relay server...');

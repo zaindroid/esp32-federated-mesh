@@ -1,218 +1,140 @@
 #!/usr/bin/env python3
 """
 ESP32-S3 Federated Learning Bridge
-WebSocket relay server - receives telemetry from web clients and broadcasts to all
+Relay server for broadcasting telemetry between browser clients
 """
 
-import json
 import asyncio
-import websockets
-import time
+import json
 import os
 from datetime import datetime
-from typing import Set, Dict, Any
 from aiohttp import web
+import aiohttp
 
 # Configuration
-WEBSOCKET_PORT = int(os.getenv('PORT', 8080))
+HTTP_PORT = int(os.getenv('PORT', 8080))
 APP_VERSION = os.getenv('APP_VERSION', 'dev')
 BUILD_SHA = os.getenv('BUILD_SHA', 'unknown')
 
 # Connected WebSocket clients
-connected_clients: Set[websockets.WebSocketServerProtocol] = set()
+clients = set()
 
-# Latest node data cache
-node_data: Dict[int, Dict[str, Any]] = {}
-
-# Health status
-health_status = {
-    'clients_connected': 0,
-    'nodes_seen': 0,
-    'last_data_time': None
-}
+# Startup time for health checks
+startup_time = datetime.utcnow()
 
 
-async def websocket_handler(websocket, path):
-    """Handle WebSocket connections"""
-    client_addr = websocket.remote_address
-    print(f"[WS] Client connected: {client_addr}")
+async def health_handler(request):
+    """Health check endpoint for load balancer"""
+    uptime_seconds = (datetime.utcnow() - startup_time).total_seconds()
     
-    connected_clients.add(websocket)
-    health_status['clients_connected'] = len(connected_clients)
+    health_data = {
+        "status": "healthy",
+        "service": "esp32-federated-bridge",
+        "version": APP_VERSION,
+        "build": BUILD_SHA,
+        "uptime_seconds": uptime_seconds,
+        "connected_clients": len(clients),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+    return web.json_response(health_data)
+
+
+async def websocket_handler(request):
+    """Handle WebSocket connections from browser clients"""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    
+    clients.add(ws)
+    print(f"[WS] Client connected. Total clients: {len(clients)}")
     
     try:
-        # Send current state to new client
-        if node_data:
-            for node_id, data in node_data.items():
-                welcome_msg = {
-                    'type': 'telemetry',
-                    'timestamp': time.time(),
-                    **data
-                }
-                await websocket.send(json.dumps(welcome_msg))
-            print(f"[WS] Sent {len(node_data)} cached nodes to new client")
-        
-        # Listen for messages from client
-        async for message in websocket:
-            try:
-                data = json.loads(message)
-                
-                # Handle ping/pong
-                if data.get('type') == 'ping':
-                    await websocket.send(json.dumps({'type': 'pong'}))
-                    continue
-                
-                # Handle telemetry from client
-                if data.get('type') == 'telemetry' and 'node_id' in data:
-                    timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-                    print(f"[{timestamp}] Telemetry from Node {data['node_id']}: {data}")
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
                     
-                    # Update cache
-                    node_id = data['node_id']
-                    if node_id not in node_data:
-                        node_data[node_id] = {}
-                    node_data[node_id].update(data)
-                    node_data[node_id]['timestamp'] = time.time()
-                    
-                    health_status['nodes_seen'] = len(node_data)
-                    health_status['last_data_time'] = time.time()
-                    
-                    # Broadcast to all other clients
-                    message_json = json.dumps(data)
-                    disconnected = set()
-                    
-                    for client in connected_clients:
-                        if client != websocket:  # Don't echo back to sender
-                            try:
-                                await client.send(message_json)
-                            except websockets.exceptions.ConnectionClosed:
-                                disconnected.add(client)
-                            except Exception as e:
-                                print(f"[WS] Error broadcasting: {e}")
-                                disconnected.add(client)
-                    
-                    # Remove disconnected clients
-                    for client in disconnected:
-                        connected_clients.discard(client)
-                        health_status['clients_connected'] = len(connected_clients)
+                    # Broadcast telemetry to all other clients
+                    if data.get('type') == 'telemetry':
+                        print(f"[RELAY] Broadcasting telemetry from node {data.get('node_id', 'unknown')}")
                         
-            except json.JSONDecodeError:
-                print(f"[WS] Invalid JSON from {client_addr}: {message[:100]}")
-            except Exception as e:
-                print(f"[WS] Error processing message: {e}")
+                        # Send to all clients except sender
+                        for client in clients:
+                            if client != ws and not client.closed:
+                                try:
+                                    await client.send_str(msg.data)
+                                except Exception as e:
+                                    print(f"[ERROR] Failed to send to client: {e}")
+                
+                except json.JSONDecodeError:
+                    print(f"[ERROR] Invalid JSON received")
+                except Exception as e:
+                    print(f"[ERROR] Error processing message: {e}")
+            
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                print(f"[WS] Connection error: {ws.exception()}")
     
-    except websockets.exceptions.ConnectionClosed:
-        pass
-    except Exception as e:
-        print(f"[WS] Error: {e}")
     finally:
-        connected_clients.discard(websocket)
-        health_status['clients_connected'] = len(connected_clients)
-        print(f"[WS] Client disconnected: {client_addr}")
+        clients.discard(ws)
+        print(f"[WS] Client disconnected. Total clients: {len(clients)}")
+    
+    return ws
 
-
-# HTTP endpoints for health checks
-async def health_handler(request):
-    """Health check endpoint - must be fast and not touch database"""
-    return web.json_response({'status': 'ok'})
-
-async def ready_handler(request):
-    """Readiness check - verifies dependencies"""
-    return web.json_response({
-        'status': 'ready',
-        'clients_connected': health_status['clients_connected'],
-        'nodes_seen': health_status['nodes_seen']
-    })
-
-async def version_handler(request):
-    """Version endpoint"""
-    return web.json_response({
-        'version': APP_VERSION,
-        'sha': BUILD_SHA,
-        'built': datetime.now().isoformat()
-    })
-
-async def openapi_handler(request):
-    """OpenAPI spec endpoint"""
-    spec = {
-        'openapi': '3.0.0',
-        'info': {
-            'title': 'ESP32 Federated Learning Bridge',
-            'version': APP_VERSION,
-            'description': 'WebSocket relay for ESP32-S3 federated learning telemetry'
-        },
-        'paths': {
-            '/health': {
-                'get': {
-                    'summary': 'Health check',
-                    'responses': {'200': {'description': 'Service is healthy'}}
-                }
-            },
-            '/ready': {
-                'get': {
-                    'summary': 'Readiness check',
-                    'responses': {'200': {'description': 'Service is ready'}}
-                }
-            },
-            '/version': {
-                'get': {
-                    'summary': 'Version information',
-                    'responses': {'200': {'description': 'Version and build info'}}
-                }
-            }
-        }
-    }
-    return web.json_response(spec)
 
 async def index_handler(request):
-    """Serve the web dashboard"""
-    try:
-        with open('web/index.html', 'r') as f:
-            return web.Response(text=f.read(), content_type='text/html')
-    except FileNotFoundError:
-        return web.Response(text='Dashboard not found', status=404)
+    """Serve the dashboard HTML"""
+    index_path = os.path.join(os.path.dirname(__file__), 'web', 'index.html')
+    return web.FileResponse(index_path)
 
 
-async def start_http_server():
-    """Start HTTP server for health checks and static files"""
-    app = web.Application()
-    app.router.add_get('/health', health_handler)
-    app.router.add_get('/ready', ready_handler)
-    app.router.add_get('/version', version_handler)
-    app.router.add_get('/openapi.json', openapi_handler)
-    app.router.add_get('/', index_handler)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', WEBSOCKET_PORT)
-    await site.start()
-    print(f"[HTTP] Server running on http://0.0.0.0:{WEBSOCKET_PORT}")
-
-
-async def main():
-    """Main application entry point"""
-    print("=" * 60)
-    print("ESP32-S3 Federated Learning Bridge (WebSocket Relay)")
+async def on_startup(app):
+    """Print startup banner"""
+    print()
+    print("=" * 70)
+    print("ESP32-S3 Federated Learning Bridge")
+    print("=" * 70)
     print(f"Version: {APP_VERSION}")
-    print("=" * 60)
-    
-    # Start HTTP server for health checks
-    await start_http_server()
-    
-    # Start WebSocket server
-    print(f"[WS] Starting WebSocket server on port {WEBSOCKET_PORT + 1}...")
-    
-    async with websockets.serve(websocket_handler, "0.0.0.0", WEBSOCKET_PORT + 1):
-        print(f"[WS] WebSocket server running on ws://0.0.0.0:{WEBSOCKET_PORT + 1}")
-        print(f"[BRIDGE] Ready to relay ESP32-S3 telemetry between clients")
-        print()
-        
-        # Run forever
-        await asyncio.Future()  # Run forever
+    print(f"Build: {BUILD_SHA}")
+    print(f"HTTP/WebSocket Port: {HTTP_PORT}")
+    print()
+    print("Endpoints:")
+    print(f"  Dashboard:   http://0.0.0.0:{HTTP_PORT}/")
+    print(f"  Health:      http://0.0.0.0:{HTTP_PORT}/health")
+    print(f"  WebSocket:   ws://0.0.0.0:{HTTP_PORT}/ws")
+    print()
+    print("Ready to relay telemetry between browser clients")
+    print("=" * 70)
+    print()
 
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[BRIDGE] Stopped by user")
+async def on_cleanup(app):
+    """Cleanup on shutdown"""
+    print("\n[SHUTDOWN] Closing all WebSocket connections...")
+    for ws in clients:
+        await ws.close()
+    clients.clear()
+
+
+def create_app():
+    """Create and configure the aiohttp application"""
+    app = web.Application()
+    
+    # Routes
+    app.router.add_get('/', index_handler)
+    app.router.add_get('/health', health_handler)
+    app.router.add_get('/ws', websocket_handler)
+    
+    # Static files
+    web_dir = os.path.join(os.path.dirname(__file__), 'web')
+    app.router.add_static('/static', web_dir, name='static')
+    
+    # Lifecycle hooks
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
+    
+    return app
+
+
+if __name__ == '__main__':
+    app = create_app()
+    web.run_app(app, host='0.0.0.0', port=HTTP_PORT)
