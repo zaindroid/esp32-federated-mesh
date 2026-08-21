@@ -83,7 +83,9 @@ async def websocket_handler(request):
 
 async def index_handler(request):
     """Serve the dashboard HTML"""
-    index_path = os.path.join(os.path.dirname(__file__), 'web', 'index.html')
+    # web/ is a sibling directory in the container
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    index_path = os.path.join(base_dir, 'web', 'index.html')
     return web.FileResponse(index_path)
 
 
@@ -125,7 +127,8 @@ def create_app():
     app.router.add_get('/ws', websocket_handler)
     
     # Static files
-    web_dir = os.path.join(os.path.dirname(__file__), 'web')
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    web_dir = os.path.join(base_dir, 'web')
     app.router.add_static('/static', web_dir, name='static')
     
     # Lifecycle hooks
