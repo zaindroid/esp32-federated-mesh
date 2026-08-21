@@ -3,6 +3,3 @@ memory_mb: 512
 port: 8080
 domains:
   - esp32-mesh.zaindroid.me
-env:
-  SERIAL_PORT:
-    required: true
