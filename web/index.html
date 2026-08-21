@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-S3 Federated Learning Digital Twin</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Courier New', monospace;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
+            color: #00ff88;
+            overflow: hidden;
+        }
+        
+        #container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+        
+        #info-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(10, 14, 39, 0.9);
+            border: 2px solid #00ff88;
+            border-radius: 10px;
+            padding: 20px;
+            min-width: 300px;
+            z-index: 100;
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
+        }
+        
+        #info-panel h1 {
+            font-size: 18px;
+            margin-bottom: 15px;
+            color: #00ff88;
+            text-shadow: 0 0 10px #00ff88;
+        }
+        
+        .node-info {
+            margin: 10px 0;
+            padding: 10px;
+            background: rgba(0, 255, 136, 0.1);
+            border-radius: 5px;
+            border-left: 3px solid #00ff88;
+        }
+        
+        .node-info.anomaly {
+            border-left-color: #ff3366;
+            animation: pulse-border 1s infinite;
+        }
+        
+        @keyframes pulse-border {
+            0%, 100% { border-left-color: #ff3366; }
+            50% { border-left-color: #ff6699; }
+        }
+        
+        .node-title {
+            font-weight: bold;
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+        
+        .node-stat {
+            font-size: 12px;
+            margin: 3px 0;
+            opacity: 0.9;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        
+        .status-green { background: #00ff88; box-shadow: 0 0 10px #00ff88; }
+        .status-yellow { background: #ffaa00; box-shadow: 0 0 10px #ffaa00; }
+        .status-red { background: #ff3366; box-shadow: 0 0 10px #ff3366; animation: pulse 1s infinite; }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.7; transform: scale(1.2); }
+        }
+        
+        #connection-status {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(10, 14, 39, 0.9);
+            border: 2px solid #00ff88;
+            border-radius: 10px;
+            padding: 15px;
+            z-index: 100;
+            font-size: 12px;
+        }
+        
+        .connected { color: #00ff88; }
+        .disconnected { color: #ff3366; }
+        
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+        }
+        
+        .mesh-event {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 255, 136, 0.2);
+            border: 2px solid #00ff88;
+            border-radius: 10px;
+            padding: 15px 30px;
+            font-size: 14px;
+            font-weight: bold;
+            animation: fade-in-out 2s ease-in-out;
+            z-index: 100;
+        }
+        
+        @keyframes fade-in-out {
+            0% { opacity: 0; transform: translateX(-50%) translateY(20px); }
+            20% { opacity: 1; transform: translateX(-50%) translateY(0); }
+            80% { opacity: 1; transform: translateX(-50%) translateY(0); }
+            100% { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="info-panel">
+            <h1>🔗 FEDERATED MESH NETWORK</h1>
+            <div id="nodes-container"></div>
+        </div>
+        
+        <div id="connection-status">
+            <div id="ws-status" class="disconnected">⚡ Disconnected</div>
+        </div>
+        
+        <div id="canvas-container"></div>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // WebSocket connection
+        let ws = null;
+        let reconnectInterval = null;
+        
+        // Node data storage
+        const nodeData = {
+            1: { loss: 0, anomaly: 0, lastUpdate: 0 },
+            2: { loss: 0, anomaly: 0, lastUpdate: 0 },
+            3: { loss: 0, anomaly: 0, lastUpdate: 0 }
+        };
+        
+        // Three.js setup
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.Fog(0x0a0e27, 10, 50);
+        
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 5, 10);
+        camera.lookAt(0, 0, 0);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x0a0e27, 1);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+        
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404040, 1);
+        scene.add(ambientLight);
+        
+        const pointLight = new THREE.PointLight(0x00ff88, 2, 50);
+        pointLight.position.set(0, 10, 0);
+        scene.add(pointLight);
+        
+        // Node objects
+        const nodes = {};
+        const nodeLabels = {};
+        const meshLines = {};
+        
+        // Create node cubes
+        function createNode(nodeId, position) {
+            const geometry = new THREE.BoxGeometry(1, 1, 1);
+            const material = new THREE.MeshPhongMaterial({
+                color: 0x00ff88,
+                emissive: 0x00ff88,
+                emissiveIntensity: 0.3,
+                shininess: 100
+            });
+            const cube = new THREE.Mesh(geometry, material);
+            cube.position.set(position.x, position.y, position.z);
+            scene.add(cube);
+            
+            // Create glow effect
+            const glowGeometry = new THREE.BoxGeometry(1.2, 1.2, 1.2);
+            const glowMaterial = new THREE.MeshBasicMaterial({
+                color: 0x00ff88,
+                transparent: true,
+                opacity: 0.2,
+                side: THREE.BackSide
+            });
+            const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+            cube.add(glow);
+            
+            // Create label
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 128;
+            const context = canvas.getContext('2d');
+            context.fillStyle = '#00ff88';
+            context.font = 'Bold 40px Courier New';
+            context.textAlign = 'center';
+            context.fillText(`NODE ${nodeId}`, 128, 50);
+            context.font = 'Bold 30px Courier New';
+            context.fillText('LOSS: 0.000', 128, 90);
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
+            const sprite = new THREE.Sprite(spriteMaterial);
+            sprite.position.set(position.x, position.y + 1.5, position.z);
+            sprite.scale.set(4, 2, 1);
+            scene.add(sprite);
+            
+            nodes[nodeId] = { cube, glow, canvas, context, texture, baseY: position.y };
+            nodeLabels[nodeId] = sprite;
+        }
+        
+        // Create mesh connection lines
+        function createMeshLine(fromNode, toNode) {
+            const key = `${Math.min(fromNode, toNode)}-${Math.max(fromNode, toNode)}`;
+            
+            if (meshLines[key]) {
+                // Animate existing line
+                meshLines[key].material.opacity = 1.0;
+                meshLines[key].material.emissiveIntensity = 1.0;
+                return;
+            }
+            
+            const fromPos = nodes[fromNode].cube.position;
+            const toPos = nodes[toNode].cube.position;
+            
+            const points = [];
+            const segments = 20;
+            for (let i = 0; i <= segments; i++) {
+                const t = i / segments;
+                const x = fromPos.x + (toPos.x - fromPos.x) * t;
+                const z = fromPos.z + (toPos.z - fromPos.z) * t;
+                const y = fromPos.y + (toPos.y - fromPos.y) * t + Math.sin(t * Math.PI) * 2;
+                points.push(new THREE.Vector3(x, y, z));
+            }
+            
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const material = new THREE.LineBasicMaterial({
+                color: 0x00ffff,
+                transparent: true,
+                opacity: 0.8,
+                linewidth: 3
+            });
+            
+            const line = new THREE.Line(geometry, material);
+            scene.add(line);
+            meshLines[key] = line;
+        }
+        
+        // Initialize nodes in triangular formation
+        createNode(1, { x: -3, y: 0, z: 0 });
+        createNode(2, { x: 3, y: 0, z: 0 });
+        createNode(3, { x: 0, y: 0, z: -4 });
+        
+        // Update node visualization
+        function updateNode(nodeId, data) {
+            if (!nodes[nodeId]) return;
+            
+            const node = nodes[nodeId];
+            const anomaly = data.anomaly || 0;
+            const loss = data.loss || 0;
+            
+            // Update color based on anomaly score
+            let color, emissiveColor;
+            if (anomaly < 0.2) {
+                color = 0x00ff88;  // Green
+                emissiveColor = 0x00ff88;
+            } else if (anomaly < 0.7) {
+                color = 0xffaa00;  // Yellow
+                emissiveColor = 0xffaa00;
+            } else {
+                color = 0xff3366;  // Red
+                emissiveColor = 0xff3366;
+            }
+            
+            node.cube.material.color.setHex(color);
+            node.cube.material.emissive.setHex(emissiveColor);
+            node.glow.material.color.setHex(color);
+            
+            // Vibrate on high anomaly
+            if (anomaly > 0.7) {
+                node.cube.position.y = node.baseY + Math.sin(Date.now() * 0.01) * 0.2;
+                node.cube.scale.set(1.1, 1.1, 1.1);
+            } else {
+                node.cube.position.y = node.baseY;
+                node.cube.scale.set(1, 1, 1);
+            }
+            
+            // Update label
+            node.context.clearRect(0, 0, 256, 128);
+            node.context.fillStyle = `#${color.toString(16).padStart(6, '0')}`;
+            node.context.font = 'Bold 40px Courier New';
+            node.context.textAlign = 'center';
+            node.context.fillText(`NODE ${nodeId}`, 128, 50);
+            node.context.font = 'Bold 30px Courier New';
+            node.context.fillText(`LOSS: ${loss.toFixed(3)}`, 128, 90);
+            node.texture.needsUpdate = true;
+        }
+        
+        // Update info panel
+        function updateInfoPanel() {
+            const container = document.getElementById('nodes-container');
+            container.innerHTML = '';
+            
+            for (let nodeId in nodeData) {
+                const data = nodeData[nodeId];
+                const anomaly = data.anomaly || 0;
+                
+                let statusClass = 'status-green';
+                let statusText = 'NORMAL';
+                if (anomaly >= 0.7) {
+                    statusClass = 'status-red';
+                    statusText = 'ANOMALY';
+                } else if (anomaly >= 0.2) {
+                    statusClass = 'status-yellow';
+                    statusText = 'ELEVATED';
+                }
+                
+                const isActive = (Date.now() - data.lastUpdate) < 5000;
+                const nodeClass = (anomaly >= 0.7) ? 'node-info anomaly' : 'node-info';
+                
+                container.innerHTML += `
+                    <div class="${nodeClass}">
+                        <div class="node-title">
+                            <span class="status-indicator ${statusClass}"></span>
+                            NODE ${nodeId} - ${statusText}
+                        </div>
+                        <div class="node-stat">Loss: ${data.loss.toFixed(4)}</div>
+                        <div class="node-stat">Anomaly: ${(anomaly * 100).toFixed(1)}%</div>
+                        <div class="node-stat" style="opacity: 0.6;">${isActive ? '🟢 Active' : '⚪ Idle'}</div>
+                    </div>
+                `;
+            }
+        }
+        
+        // WebSocket connection
+        function connectWebSocket() {
+            ws = new WebSocket('ws://localhost:8080');
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                document.getElementById('ws-status').textContent = '⚡ Connected';
+                document.getElementById('ws-status').className = 'connected';
+                if (reconnectInterval) {
+                    clearInterval(reconnectInterval);
+                    reconnectInterval = null;
+                }
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'telemetry' && data.node_id) {
+                        const nodeId = data.node_id;
+                        
+                        if (!nodeData[nodeId]) {
+                            nodeData[nodeId] = { loss: 0, anomaly: 0, lastUpdate: 0 };
+                        }
+                        
+                        if (data.loss !== undefined) nodeData[nodeId].loss = data.loss;
+                        if (data.anomaly !== undefined) nodeData[nodeId].anomaly = data.anomaly;
+                        nodeData[nodeId].lastUpdate = Date.now();
+                        
+                        updateNode(nodeId, nodeData[nodeId]);
+                        updateInfoPanel();
+                        
+                        // Show mesh sync animation
+                        if (data.mesh_event && data.peer_node_id) {
+                            createMeshLine(nodeId, data.peer_node_id);
+                            showMeshEvent(nodeId, data.peer_node_id);
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error parsing message:', e);
+                }
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                document.getElementById('ws-status').textContent = '⚡ Disconnected';
+                document.getElementById('ws-status').className = 'disconnected';
+                
+                if (!reconnectInterval) {
+                    reconnectInterval = setInterval(() => {
+                        console.log('Attempting to reconnect...');
+                        connectWebSocket();
+                    }, 3000);
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+        }
+        
+        // Show mesh synchronization event
+        function showMeshEvent(fromNode, toNode) {
+            const event = document.createElement('div');
+            event.className = 'mesh-event';
+            event.textContent = `⚡ FEDERATED SYNC: Node ${fromNode} ↔ Node ${toNode}`;
+            document.body.appendChild(event);
+            
+            setTimeout(() => {
+                event.remove();
+            }, 2000);
+        }
+        
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const time = Date.now() * 0.001;
+            
+            // Rotate all nodes
+            for (let nodeId in nodes) {
+                nodes[nodeId].cube.rotation.x = time * 0.5;
+                nodes[nodeId].cube.rotation.y = time * 0.7;
+            }
+            
+            // Fade mesh lines
+            for (let key in meshLines) {
+                const line = meshLines[key];
+                line.material.opacity *= 0.95;
+                if (line.material.opacity < 0.05) {
+                    scene.remove(line);
+                    delete meshLines[key];
+                }
+            }
+            
+            // Camera orbit
+            camera.position.x = Math.sin(time * 0.1) * 10;
+            camera.position.z = Math.cos(time * 0.1) * 10;
+            camera.lookAt(0, 0, 0);
+            
+            renderer.render(scene, camera);
+        }
+        
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+        
+        // Start
+        connectWebSocket();
+        animate();
+        updateInfoPanel();
+    </script>
+</body>
+</html>

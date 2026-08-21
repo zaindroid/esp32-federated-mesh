@@ -1,0 +1,26 @@
+# PlatformIO
+.pio/
+.vscode/
+*.pyc
+__pycache__/
+
+# Python
+*.egg-info/
+dist/
+build/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# IDE
+.idea/
+*.iml
