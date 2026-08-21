@@ -11,20 +11,32 @@ import asyncio
 import websockets
 import re
 import time
+import os
 from datetime import datetime
 from typing import Set, Dict, Any
+from aiohttp import web
 
 # Configuration
 SERIAL_BAUD = 115200
-WEBSOCKET_PORT = 8080
+WEBSOCKET_PORT = int(os.getenv('PORT', 8080))
+SERIAL_PORT = os.getenv('SERIAL_PORT', None)
 SERIAL_TIMEOUT = 1.0
 RECONNECT_DELAY = 5.0
+APP_VERSION = os.getenv('APP_VERSION', 'dev')
+BUILD_SHA = os.getenv('BUILD_SHA', 'unknown')
 
 # Connected WebSocket clients
 connected_clients: Set[websockets.WebSocketServerProtocol] = set()
 
 # Latest node data cache
 node_data: Dict[int, Dict[str, Any]] = {}
+
+# Health status
+health_status = {
+    'serial_connected': False,
+    'last_data_time': None,
+    'clients_connected': 0
+}
 
 class SerialReader:
     def __init__(self, port: str = None, baud: int = SERIAL_BAUD):
@@ -50,9 +62,11 @@ class SerialReader:
                 self.port = self.find_esp32_port()
                 
             if not self.port:
-                print("[BRIDGE] ERROR: No ESP32 device found. Available ports:")
+                print("[BRIDGE] WARNING: No ESP32 device found. Available ports:")
                 for port in serial.tools.list_ports.comports():
                     print(f"  - {port.device}: {port.description}")
+                print("[BRIDGE] Running in mock mode - health checks will work, but no real data")
+                health_status['serial_connected'] = False
                 return False
             
             print(f"[BRIDGE] Connecting to {self.port} at {self.baud} baud...")
@@ -67,10 +81,12 @@ class SerialReader:
             self.serial_conn.reset_output_buffer()
             
             print(f"[BRIDGE] Connected to {self.port}")
+            health_status['serial_connected'] = True
             return True
             
         except serial.SerialException as e:
             print(f"[BRIDGE] ERROR: Failed to connect: {e}")
+            health_status['serial_connected'] = False
             return False
     
     def disconnect(self):
@@ -78,6 +94,7 @@ class SerialReader:
         if self.serial_conn and self.serial_conn.is_open:
             self.serial_conn.close()
             print("[BRIDGE] Serial connection closed")
+        health_status['serial_connected'] = False
     
     def parse_log_line(self, line: str) -> Dict[str, Any]:
         """Parse ESP32 serial log line and extract telemetry"""
@@ -144,6 +161,7 @@ class SerialReader:
                         # Parse and broadcast
                         parsed_data = self.parse_log_line(line)
                         if parsed_data:
+                            health_status['last_data_time'] = time.time()
                             await self.broadcast_telemetry(parsed_data)
                 
                 await asyncio.sleep(0.01)  # Small delay to prevent CPU thrashing
@@ -207,6 +225,7 @@ async def websocket_handler(websocket, path):
     print(f"[WS] Client connected: {client_addr}")
     
     connected_clients.add(websocket)
+    health_status['clients_connected'] = len(connected_clients)
     
     try:
         # Send current state to new client
@@ -230,24 +249,113 @@ async def websocket_handler(websocket, path):
         print(f"[WS] Error: {e}")
     finally:
         connected_clients.discard(websocket)
+        health_status['clients_connected'] = len(connected_clients)
         print(f"[WS] Client disconnected: {client_addr}")
+
+
+# HTTP endpoints for health checks
+async def health_handler(request):
+    """Health check endpoint - must be fast and not touch database"""
+    return web.json_response({'status': 'ok'})
+
+async def ready_handler(request):
+    """Readiness check - verifies dependencies"""
+    # For this app, we're ready even without serial connection
+    # (it can run in mock mode)
+    return web.json_response({
+        'status': 'ready',
+        'serial_connected': health_status['serial_connected'],
+        'clients_connected': health_status['clients_connected']
+    })
+
+async def version_handler(request):
+    """Version endpoint"""
+    return web.json_response({
+        'version': APP_VERSION,
+        'sha': BUILD_SHA,
+        'built': datetime.now().isoformat()
+    })
+
+async def openapi_handler(request):
+    """OpenAPI spec endpoint"""
+    spec = {
+        'openapi': '3.0.0',
+        'info': {
+            'title': 'ESP32 Federated Learning Bridge',
+            'version': APP_VERSION,
+            'description': 'WebSocket bridge for ESP32-S3 federated learning telemetry'
+        },
+        'paths': {
+            '/health': {
+                'get': {
+                    'summary': 'Health check',
+                    'responses': {'200': {'description': 'Service is healthy'}}
+                }
+            },
+            '/ready': {
+                'get': {
+                    'summary': 'Readiness check',
+                    'responses': {'200': {'description': 'Service is ready'}}
+                }
+            },
+            '/version': {
+                'get': {
+                    'summary': 'Version information',
+                    'responses': {'200': {'description': 'Version and build info'}}
+                }
+            }
+        }
+    }
+    return web.json_response(spec)
+
+async def index_handler(request):
+    """Serve the web dashboard"""
+    try:
+        with open('web/index.html', 'r') as f:
+            return web.Response(text=f.read(), content_type='text/html')
+    except FileNotFoundError:
+        return web.Response(text='Dashboard not found', status=404)
+
+
+async def start_http_server():
+    """Start HTTP server for health checks and static files"""
+    app = web.Application()
+    app.router.add_get('/health', health_handler)
+    app.router.add_get('/ready', ready_handler)
+    app.router.add_get('/version', version_handler)
+    app.router.add_get('/openapi.json', openapi_handler)
+    app.router.add_get('/', index_handler)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', WEBSOCKET_PORT)
+    await site.start()
+    print(f"[HTTP] Server running on http://0.0.0.0:{WEBSOCKET_PORT}")
 
 
 async def main():
     """Main application entry point"""
     print("=" * 60)
     print("ESP32-S3 Federated Learning Bridge")
+    print(f"Version: {APP_VERSION}")
     print("=" * 60)
     
+    # Validate required env vars
+    if not SERIAL_PORT:
+        print("[BRIDGE] WARNING: SERIAL_PORT env var not set, will auto-detect")
+    
+    # Start HTTP server for health checks
+    await start_http_server()
+    
     # Start serial reader
-    serial_reader = SerialReader()
+    serial_reader = SerialReader(port=SERIAL_PORT)
     serial_task = asyncio.create_task(serial_reader.read_loop())
     
-    # Start WebSocket server
+    # Start WebSocket server on same port (will handle upgrade)
     print(f"[WS] Starting WebSocket server on port {WEBSOCKET_PORT}...")
     
-    async with websockets.serve(websocket_handler, "localhost", WEBSOCKET_PORT):
-        print(f"[WS] WebSocket server running on ws://localhost:{WEBSOCKET_PORT}")
+    async with websockets.serve(websocket_handler, "0.0.0.0", WEBSOCKET_PORT + 1):
+        print(f"[WS] WebSocket server running on ws://0.0.0.0:{WEBSOCKET_PORT + 1}")
         print(f"[BRIDGE] Ready to bridge ESP32-S3 telemetry to web clients")
         print()
         
