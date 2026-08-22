@@ -107,6 +107,13 @@ async def index_handler(request):
     return web.FileResponse(index_path)
 
 
+async def flasher_handler(request):
+    """Serve the firmware flasher HTML"""
+    web_dir = find_web_dir()
+    flasher_path = os.path.join(web_dir, 'flasher.html')
+    return web.FileResponse(flasher_path)
+
+
 async def on_startup(app):
     """Print startup banner"""
     print()
@@ -143,6 +150,7 @@ def create_app():
     
     # Routes
     app.router.add_get('/', index_handler)
+    app.router.add_get('/flasher.html', flasher_handler)
     app.router.add_get('/health', health_handler)
     app.router.add_get('/ws', websocket_handler)
     
